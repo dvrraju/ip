@@ -1,0 +1,5 @@
+# Editor swap files
+*.swp
+
+# Verilator build output
+obj_dir/
