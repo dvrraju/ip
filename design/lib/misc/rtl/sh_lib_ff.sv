@@ -12,10 +12,10 @@
 
 module sh_lib_ff #(
   parameter int unsigned      WIDTH     = 1,
-  parameter bit               EN        = 1'b0,
-  parameter bit               RST_EN    = 1'b1,
-  parameter bit               RST_LOW   = 1'b1,
-  parameter bit               RST_ASYNC = 1'b1,
+  parameter logic             EN        = 1'b0,
+  parameter logic             RST_EN    = 1'b1,
+  parameter logic             RST_LOW   = 1'b1,
+  parameter logic             RST_ASYNC = 1'b1,
   parameter logic [WIDTH-1:0] RST_VAL   = '0
 ) (
   input  logic             clk,
@@ -52,7 +52,7 @@ module sh_lib_ff #(
       else     q <= d_nxt;
     end
   end else begin : g_sync
-    localparam bit RST_ACT = !RST_LOW;
+    localparam logic RST_ACT = !RST_LOW;
     always_ff @(posedge clk) begin
       if (rst == RST_ACT) q <= RST_VAL;
       else                q <= d_nxt;
