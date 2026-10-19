@@ -4,6 +4,7 @@
 //   WIDTH      - data width in bits
 //   DEPTH      - number of entries (power of 2, minimum 2)
 //   SYNC_DELAY - synchronizer flops on each pointer crossing (minimum 2)
+//   MEM_RD_DEL - memory read latency in rd_clk cycles; 0 = combinational read
 //   RST_LOW    - reset sense: 1 = active-low, 0 = active-high (both domains)
 //   RST_ASYNC  - reset type:  1 = asynchronous, 0 = synchronous (both domains)
 //   AW         - memory address width (derived from DEPTH, do not override)
@@ -14,15 +15,21 @@
 // write) shows up on the other side a few cycles later.
 //
 // Storage is external: connect mem_* to a DEPTH x WIDTH memory with a write
-// port in wr_clk (written when mem_wr_en is high) and a combinational read
-// port (mem_rd_data is the word at mem_rd_addr, used in rd_clk). Reading
-// across the clock boundary is safe because an entry is not visible to the
-// reader until its write pointer has crossed. Reset both domains together.
+// port in wr_clk (written when mem_wr_en is high) and a read port in rd_clk:
+// mem_rd_data is the word at mem_rd_addr MEM_RD_DEL rd_clk cycles after
+// mem_rd_en (in the same cycle when MEM_RD_DEL = 0). Reading across the clock
+// boundary is safe because an entry is not visible to the reader until its
+// write pointer has crossed. Reset both domains together.
+//
+// With MEM_RD_DEL > 0, entries are read ahead into a small flop buffer (see
+// sh_lib_fifo_rd_pipe), so the FIFO holds up to DEPTH + MEM_RD_DEL + 2
+// entries and an entry takes MEM_RD_DEL + 1 extra rd_clk cycles to reach rd_*.
 
 module sh_lib_async_fifo #(
   parameter int unsigned WIDTH      = 8,
   parameter int unsigned DEPTH      = 4,
   parameter int unsigned SYNC_DELAY = 2,
+  parameter int unsigned MEM_RD_DEL = 0,
   parameter logic        RST_LOW    = 1'b1,
   parameter logic        RST_ASYNC  = 1'b1,
   parameter int unsigned AW         = $clog2(DEPTH)
@@ -71,7 +78,8 @@ module sh_lib_async_fifo #(
   logic [AW:0] wr_gray;
   logic [AW:0] rd_gray_s;
   logic [AW:0] rd_bin_s;
-  logic        pop;
+  logic        issue;       // entry read out of the memory
+  logic        mem_avail;
   logic [AW:0] rd_bin;
   logic [AW:0] rd_gray;
   logic [AW:0] wr_gray_s;
@@ -123,8 +131,7 @@ module sh_lib_async_fifo #(
   // Read domain
   // ---------------------------------------------------------------------------
 
-  assign rd_vld = (bin2gray(rd_bin) != wr_gray_s);
-  assign pop    = rd_vld && rd_rdy;
+  assign mem_avail = (bin2gray(rd_bin) != wr_gray_s);
 
   sh_lib_ff #(
     .WIDTH     (AW + 1),
@@ -134,7 +141,7 @@ module sh_lib_async_fifo #(
   ) u_rd_bin (
     .clk (rd_clk),
     .rst (rd_rst),
-    .en  (pop),
+    .en  (issue),
     .d   (rd_bin + 1'b1),
     .q   (rd_bin)
   );
@@ -170,8 +177,23 @@ module sh_lib_async_fifo #(
   assign mem_wr_en   = push;
   assign mem_wr_addr = wr_bin[AW-1:0];
   assign mem_wr_data = wr_data;
-  assign mem_rd_en   = rd_vld;
   assign mem_rd_addr = rd_bin[AW-1:0];
-  assign rd_data     = mem_rd_data;
+
+  sh_lib_fifo_rd_pipe #(
+    .WIDTH      (WIDTH),
+    .MEM_RD_DEL (MEM_RD_DEL),
+    .RST_LOW    (RST_LOW),
+    .RST_ASYNC  (RST_ASYNC)
+  ) u_rd_pipe (
+    .clk         (rd_clk),
+    .rst         (rd_rst),
+    .mem_avail   (mem_avail),
+    .issue       (issue),
+    .mem_rd_en   (mem_rd_en),
+    .mem_rd_data (mem_rd_data),
+    .rd_vld      (rd_vld),
+    .rd_rdy      (rd_rdy),
+    .rd_data     (rd_data)
+  );
 
 endmodule
