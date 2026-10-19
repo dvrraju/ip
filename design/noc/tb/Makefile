@@ -1,12 +1,17 @@
 # sh_noc_mesh lint and simulation (Verilator)
 #
 #   make lint                      lint the mesh with -Wall
-#   make sim                       build and run the random-traffic test
-#   make sim PARAMS="-GROWS=4 -GCOLS=4 -GASYNC=0" SEED=7
+#   make sim                       build and run the random-transaction test
+#   make sim PARAMS="-GASYNC=0 +define+SH_NOC_ROWS=2" SEED=7
 #   make regress                   run a set of configurations
+#
+# PARAMS takes -G<tb parameter>=<value> for the implementation parameters and
+# +define+SH_NOC_<name>=<value> to override sh_noc_pkg (ROWS, COLS, FLIT_W,
+# MAX_LEN, TAG_W).
 
 ROOT    := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../../..)
-RTL     := $(shell find $(ROOT)/design -path '*/rtl/*.sv' | sort)
+PKG     := $(ROOT)/design/ip_top/pkg/ip_top_pkg.sv $(ROOT)/design/noc/pkg/sh_noc_pkg.sv
+RTL     := $(PKG) $(shell find $(ROOT)/design -path '*/rtl/*.sv' | sort)
 TB      := $(ROOT)/design/noc/tb/sh_noc_tb_mem.sv $(ROOT)/design/noc/tb/sh_noc_mesh_tb.sv
 PARAMS  ?=
 SEED    ?= 1
@@ -24,14 +29,19 @@ sim:
 
 regress:
 	@set -e; \
-	for p in "" "-GASYNC=0" "-GROWS=1 -GCOLS=1" "-GROWS=1 -GCOLS=5" \
-	         "-GROWS=4 -GCOLS=4 -GBUF_DEPTH=2 -GCDC_DEPTH=2" \
-	         "-GROWS=2 -GCOLS=3 -GRST_LOW=0 -GRST_ASYNC=0" \
-	         "-GROWS=4 -GCOLS=4 -GINJ_PCT=100 -GEJ_PCT=100" \
+	for p in "" "-GASYNC=0" \
+	         "+define+SH_NOC_ROWS=1 +define+SH_NOC_COLS=1" \
+	         "+define+SH_NOC_ROWS=1 +define+SH_NOC_COLS=5" \
+	         "+define+SH_NOC_ROWS=3 +define+SH_NOC_COLS=5 +define+SH_NOC_MAX_LEN=1 +define+SH_NOC_TAG_W=1" \
+	         "+define+SH_NOC_ROWS=2 +define+SH_NOC_COLS=3 +define+SH_NOC_FLIT_W=96 +define+SH_NOC_MAX_LEN=5" \
+	         "-GBUF_DEPTH=2 -GCDC_DEPTH=2" \
+	         "-GBUF_DEPTH=1 -GCDC_DEPTH=2 -GTX_PCT=100" \
+	         "+define+SH_NOC_ROWS=2 +define+SH_NOC_COLS=3 -GRST_LOW=0 -GRST_ASYNC=0" \
+	         "-GTX_PCT=100 -GRX_PCT=100" \
+	         "-GUNMAPPED_PCT=60 -GRX_PCT=20" \
 	         "-GBUF_MEM_RD_DEL=1 -GCDC_MEM_RD_DEL=1" \
 	         "-GBUF_MEM_RD_DEL=2 -GCDC_MEM_RD_DEL=3 -GBUF_DEPTH=7" \
-	         "-GASYNC=0 -GBUF_MEM_RD_DEL=1 -GCDC_MEM_RD_DEL=2 -GBUF_DEPTH=1 -GCDC_DEPTH=1" \
-	         "-GROWS=4 -GCOLS=4 -GBUF_MEM_RD_DEL=1 -GBUF_DEPTH=6 -GINJ_PCT=100 -GEJ_PCT=100"; do \
+	         "-GASYNC=0 -GBUF_MEM_RD_DEL=1 -GCDC_MEM_RD_DEL=2 -GBUF_DEPTH=1 -GCDC_DEPTH=1"; do \
 	  for s in 1 2 3; do \
 	    out=$$($(MAKE) -s sim PARAMS="$$p" SEED=$$s OBJ=obj_dir_regress 2>&1); \
 	    echo "PARAMS=\"$$p\" SEED=$$s: $$(echo "$$out" | grep -E '^(PASS|FAIL)')"; \
