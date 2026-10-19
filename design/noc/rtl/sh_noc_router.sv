@@ -1,17 +1,18 @@
 // sh_noc_router: 5-port mesh router, XY routing, credit-based links
 //
 // Parameters:
-//   X_W, Y_W  - widths of the destination x / y fields in a flit
-//   DATA_W    - payload width in bits
-//   X, Y      - this router's coordinates (x grows East, y grows North)
-//   BUF_DEPTH - input buffer entries per port; also the credit count each
-//               output starts with, so every receiver must use the same depth
-//   RST_LOW   - reset sense: 1 = active-low, 0 = active-high
-//   RST_ASYNC - reset type:  1 = asynchronous, 0 = synchronous
-//   FW, BAW   - flit width / buffer address width (derived, do not override)
+//   X_W, Y_W       - widths of the destination x / y fields in a flit
+//   DATA_W         - payload width in bits
+//   X, Y           - this router's coordinates (x grows East, y grows North)
+//   BUF_DEPTH      - input buffer entries per port; also the credit count each
+//                    output starts with, so every receiver must use the same depth
+//   BUF_MEM_RD_DEL - input buffer memory read latency; 0 = combinational
+//   RST_LOW        - reset sense: 1 = active-low, 0 = active-high
+//   RST_ASYNC      - reset type:  1 = asynchronous, 0 = synchronous
+//   FW, BAW        - flit width / buffer address width (derived, do not override)
 //
 // Buffer storage is external: buf_mem_*[p] is input port p's buffer memory
-// (BUF_DEPTH x FW, one write port, one combinational read port, clk).
+// (BUF_DEPTH x FW, one write port, one read port, clk).
 //
 // Ports are indexed 0 = Local, 1 = North, 2 = East, 3 = South, 4 = West.
 // Flit layout: {dst_y, dst_x, data}. Every flit is a whole packet.
@@ -21,21 +22,22 @@
 // the inputs, and sends (registered) when it holds a credit for the next
 // router's buffer. Credits come back one per flit as that buffer drains.
 //
-// The credit loop is about 4 cycles, so BUF_DEPTH >= 4 keeps a link at full
-// rate. XY routing has no cyclic channel dependencies, so the mesh is
+// The credit loop is 4 cycles (BUF_MEM_RD_DEL + 5 with read latency), and
+// BUF_DEPTH at least that keeps a link at full rate. XY routing has no cyclic channel dependencies, so the mesh is
 // deadlock-free as long as every Local output is eventually drained.
 
 module sh_noc_router #(
-  parameter int unsigned X_W       = 2,
-  parameter int unsigned Y_W       = 2,
-  parameter int unsigned DATA_W    = 32,
-  parameter int unsigned X         = 0,
-  parameter int unsigned Y         = 0,
-  parameter int unsigned BUF_DEPTH = 4,
-  parameter logic        RST_LOW   = 1'b1,
-  parameter logic        RST_ASYNC = 1'b1,
-  parameter int unsigned FW        = Y_W + X_W + DATA_W,
-  parameter int unsigned BAW       = (BUF_DEPTH > 1) ? $clog2(BUF_DEPTH) : 1
+  parameter int unsigned X_W            = 2,
+  parameter int unsigned Y_W            = 2,
+  parameter int unsigned DATA_W         = 32,
+  parameter int unsigned X              = 0,
+  parameter int unsigned Y              = 0,
+  parameter int unsigned BUF_DEPTH      = 4,
+  parameter int unsigned BUF_MEM_RD_DEL = 0,
+  parameter logic        RST_LOW        = 1'b1,
+  parameter logic        RST_ASYNC      = 1'b1,
+  parameter int unsigned FW             = Y_W + X_W + DATA_W,
+  parameter int unsigned BAW            = (BUF_DEPTH > 1) ? $clog2(BUF_DEPTH) : 1
 ) (
   input  logic                clk,
   input  logic                rst,
@@ -82,10 +84,11 @@ module sh_noc_router #(
     logic [Y_W-1:0] dst_y;
 
     sh_noc_in_buf #(
-      .WIDTH     (FW),
-      .DEPTH     (BUF_DEPTH),
-      .RST_LOW   (RST_LOW),
-      .RST_ASYNC (RST_ASYNC)
+      .WIDTH      (FW),
+      .DEPTH      (BUF_DEPTH),
+      .MEM_RD_DEL (BUF_MEM_RD_DEL),
+      .RST_LOW    (RST_LOW),
+      .RST_ASYNC  (RST_ASYNC)
     ) u_buf (
       .clk         (clk),
       .rst         (rst),

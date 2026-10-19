@@ -1,25 +1,27 @@
 // sh_noc_in_buf: credit-based link receiver (input buffer)
 //
 // Parameters:
-//   WIDTH     - flit width in bits
-//   DEPTH     - buffer entries; the sender's credit counter must start at DEPTH
-//   RST_LOW   - reset sense: 1 = active-low, 0 = active-high
-//   RST_ASYNC - reset type:  1 = asynchronous, 0 = synchronous
-//   AW        - memory address width (derived from DEPTH, do not override)
+//   WIDTH      - flit width in bits
+//   DEPTH      - buffer entries; the sender's credit counter must start at DEPTH
+//   MEM_RD_DEL - buffer memory read latency in clk cycles; 0 = combinational
+//   RST_LOW    - reset sense: 1 = active-low, 0 = active-high
+//   RST_ASYNC  - reset type:  1 = asynchronous, 0 = synchronous
+//   AW         - memory address width (derived from DEPTH, do not override)
 //
 // Storage is external: mem_* is the sh_lib_fifo memory interface (one write
-// port, one combinational read port, DEPTH x WIDTH, clocked by clk).
+// port, one read port with MEM_RD_DEL latency, DEPTH x WIDTH, clocked by clk).
 //
 // in_vld has no ready: the sender only sends when it holds a credit, so the
 // buffer always has room. Each flit popped from the buffer returns one credit
 // on crd (registered, one-cycle pulse).
 
 module sh_noc_in_buf #(
-  parameter int unsigned WIDTH     = 8,
-  parameter int unsigned DEPTH     = 4,
-  parameter logic        RST_LOW   = 1'b1,
-  parameter logic        RST_ASYNC = 1'b1,
-  parameter int unsigned AW        = (DEPTH > 1) ? $clog2(DEPTH) : 1
+  parameter int unsigned WIDTH      = 8,
+  parameter int unsigned DEPTH      = 4,
+  parameter int unsigned MEM_RD_DEL = 0,
+  parameter logic        RST_LOW    = 1'b1,
+  parameter logic        RST_ASYNC  = 1'b1,
+  parameter int unsigned AW         = (DEPTH > 1) ? $clog2(DEPTH) : 1
 ) (
   input  logic             clk,
   input  logic             rst,
@@ -45,10 +47,11 @@ module sh_noc_in_buf #(
   /* verilator lint_on UNUSEDSIGNAL */
 
   sh_lib_fifo #(
-    .WIDTH     (WIDTH),
-    .DEPTH     (DEPTH),
-    .RST_LOW   (RST_LOW),
-    .RST_ASYNC (RST_ASYNC)
+    .WIDTH      (WIDTH),
+    .DEPTH      (DEPTH),
+    .MEM_RD_DEL (MEM_RD_DEL),
+    .RST_LOW    (RST_LOW),
+    .RST_ASYNC  (RST_ASYNC)
   ) u_fifo (
     .clk         (clk),
     .rst         (rst),

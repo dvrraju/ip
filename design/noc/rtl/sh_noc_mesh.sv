@@ -1,19 +1,23 @@
 // sh_noc_mesh: ROWS x COLS 2D mesh network-on-chip
 //
 // Parameters:
-//   ROWS       - number of rows (M); y = 0 .. ROWS-1, y grows North
-//   COLS       - number of columns (N); x = 0 .. COLS-1, x grows East
-//   DATA_W     - payload width in bits
-//   BUF_DEPTH  - router input buffer depth (>= 4 for full link throughput)
-//   ASYNC      - 1 = each tile has its own clock (tile_clk[y][x]),
-//                0 = tiles run on clk and tile_clk/tile_rst are ignored
-//   CDC_DEPTH  - entries in each tile-side FIFO (power of 2 >= 2 when ASYNC)
-//   SYNC_DELAY - synchronizer flops per pointer crossing (ASYNC = 1 only)
-//   RST_LOW    - reset sense: 1 = active-low, 0 = active-high
-//   RST_ASYNC  - reset type:  1 = asynchronous, 0 = synchronous
-//   X_W, Y_W   - destination coordinate widths (derived, do not override)
-//   FW, BAW, CAW - flit width / buffer and CDC FIFO address widths (derived,
-//                do not override)
+//   ROWS           - number of rows (M); y = 0 .. ROWS-1, y grows North
+//   COLS           - number of columns (N); x = 0 .. COLS-1, x grows East
+//   DATA_W         - payload width in bits
+//   BUF_DEPTH      - router input buffer depth (>= 4 for full link throughput,
+//                    >= BUF_MEM_RD_DEL + 5 when BUF_MEM_RD_DEL > 0)
+//   BUF_MEM_RD_DEL - read latency of the buf_mem_* memories; 0 = combinational
+//   ASYNC          - 1 = each tile has its own clock (tile_clk[y][x]),
+//                    0 = tiles run on clk and tile_clk/tile_rst are ignored
+//   CDC_DEPTH      - entries in each tile-side FIFO (power of 2 >= 2 when ASYNC)
+//   SYNC_DELAY     - synchronizer flops per pointer crossing (ASYNC = 1 only)
+//   CDC_MEM_RD_DEL - read latency of the inj_mem_* / ej_mem_* memories, in
+//                    the read side's clock; 0 = combinational
+//   RST_LOW        - reset sense: 1 = active-low, 0 = active-high
+//   RST_ASYNC      - reset type:  1 = asynchronous, 0 = synchronous
+//   X_W, Y_W       - destination coordinate widths (derived, do not override)
+//   FW, BAW, CAW   - flit width / buffer and CDC FIFO address widths (derived,
+//                    do not override)
 //
 // Tile (y, x) injects with inj_* (dst_x/dst_y select the receiving tile) and
 // receives with ej_*. Packets are single flits, routed XY (East/West first,
@@ -22,8 +26,9 @@
 // tile_rst must be asserted together with rst.
 //
 // No memories are instantiated here. Every buffer is a FIFO whose storage is
-// brought out on a memory port (one write port, one combinational read port)
-// to be connected outside:
+// brought out on a memory port to be connected outside: one write port, and
+// one read port whose data (mem_rd_data) is the word at mem_rd_addr *_RD_DEL
+// read-clock cycles after mem_rd_en (same cycle when the latency is 0):
 //   buf_mem_*[y][x][p] - BUF_DEPTH x FW on clk; p = 0..4 router input buffer
 //                        (Local, N, E, S, W), p = 5 NI eject buffer
 //   inj_mem_*[y][x]    - CDC_DEPTH x FW,     write tile_clk[y][x], read clk
@@ -31,20 +36,22 @@
 // (with ASYNC = 0 every memory is on clk)
 
 module sh_noc_mesh #(
-  parameter int unsigned ROWS       = 2,
-  parameter int unsigned COLS       = 2,
-  parameter int unsigned DATA_W     = 32,
-  parameter int unsigned BUF_DEPTH  = 4,
-  parameter logic        ASYNC      = 1'b1,
-  parameter int unsigned CDC_DEPTH  = 4,
-  parameter int unsigned SYNC_DELAY = 2,
-  parameter logic        RST_LOW    = 1'b1,
-  parameter logic        RST_ASYNC  = 1'b1,
-  parameter int unsigned X_W        = (COLS > 1) ? $clog2(COLS) : 1,
-  parameter int unsigned Y_W        = (ROWS > 1) ? $clog2(ROWS) : 1,
-  parameter int unsigned FW         = Y_W + X_W + DATA_W,
-  parameter int unsigned BAW        = (BUF_DEPTH > 1) ? $clog2(BUF_DEPTH) : 1,
-  parameter int unsigned CAW        = (CDC_DEPTH > 1) ? $clog2(CDC_DEPTH) : 1
+  parameter int unsigned ROWS           = 2,
+  parameter int unsigned COLS           = 2,
+  parameter int unsigned DATA_W         = 32,
+  parameter int unsigned BUF_DEPTH      = 4,
+  parameter int unsigned BUF_MEM_RD_DEL = 0,
+  parameter logic        ASYNC          = 1'b1,
+  parameter int unsigned CDC_DEPTH      = 4,
+  parameter int unsigned SYNC_DELAY     = 2,
+  parameter int unsigned CDC_MEM_RD_DEL = 0,
+  parameter logic        RST_LOW        = 1'b1,
+  parameter logic        RST_ASYNC      = 1'b1,
+  parameter int unsigned X_W            = (COLS > 1) ? $clog2(COLS) : 1,
+  parameter int unsigned Y_W            = (ROWS > 1) ? $clog2(ROWS) : 1,
+  parameter int unsigned FW             = Y_W + X_W + DATA_W,
+  parameter int unsigned BAW            = (BUF_DEPTH > 1) ? $clog2(BUF_DEPTH) : 1,
+  parameter int unsigned CAW            = (CDC_DEPTH > 1) ? $clog2(CDC_DEPTH) : 1
 ) (
   input  logic                                    clk,
   input  logic                                    rst,
@@ -104,14 +111,15 @@ module sh_noc_mesh #(
     for (genvar x = 0; x < COLS; x++) begin : g_col
 
       sh_noc_router #(
-        .X_W       (X_W),
-        .Y_W       (Y_W),
-        .DATA_W    (DATA_W),
-        .X         (x),
-        .Y         (y),
-        .BUF_DEPTH (BUF_DEPTH),
-        .RST_LOW   (RST_LOW),
-        .RST_ASYNC (RST_ASYNC)
+        .X_W            (X_W),
+        .Y_W            (Y_W),
+        .DATA_W         (DATA_W),
+        .X              (x),
+        .Y              (y),
+        .BUF_DEPTH      (BUF_DEPTH),
+        .BUF_MEM_RD_DEL (BUF_MEM_RD_DEL),
+        .RST_LOW        (RST_LOW),
+        .RST_ASYNC      (RST_ASYNC)
       ) u_router (
         .clk             (clk),
         .rst             (rst),
@@ -130,15 +138,17 @@ module sh_noc_mesh #(
       );
 
       sh_noc_ni #(
-        .X_W        (X_W),
-        .Y_W        (Y_W),
-        .DATA_W     (DATA_W),
-        .BUF_DEPTH  (BUF_DEPTH),
-        .ASYNC      (ASYNC),
-        .CDC_DEPTH  (CDC_DEPTH),
-        .SYNC_DELAY (SYNC_DELAY),
-        .RST_LOW    (RST_LOW),
-        .RST_ASYNC  (RST_ASYNC)
+        .X_W            (X_W),
+        .Y_W            (Y_W),
+        .DATA_W         (DATA_W),
+        .BUF_DEPTH      (BUF_DEPTH),
+        .BUF_MEM_RD_DEL (BUF_MEM_RD_DEL),
+        .ASYNC          (ASYNC),
+        .CDC_DEPTH      (CDC_DEPTH),
+        .SYNC_DELAY     (SYNC_DELAY),
+        .CDC_MEM_RD_DEL (CDC_MEM_RD_DEL),
+        .RST_LOW        (RST_LOW),
+        .RST_ASYNC      (RST_ASYNC)
       ) u_ni (
         .clk             (clk),
         .rst             (rst),

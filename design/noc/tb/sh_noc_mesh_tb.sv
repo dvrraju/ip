@@ -6,21 +6,23 @@
 // a packet arrived at the right tile and in order for its (src, dst) pair,
 // and the test checks that every packet sent was received.
 //
-// The FIFO memory ports are connected to sh_lib_beh_mem_mrnw instances
-// (combinational read), standing in for the memories used in a real design.
+// The FIFO memory ports are connected to sh_noc_tb_mem models with the
+// configured read latency, standing in for the memories of a real design.
 
 module sh_noc_mesh_tb #(
-  parameter int unsigned ROWS      = 3,
-  parameter int unsigned COLS      = 4,
-  parameter int unsigned DATA_W    = 32,
-  parameter int unsigned BUF_DEPTH = 4,
-  parameter logic        ASYNC     = 1'b1,
-  parameter int unsigned CDC_DEPTH = 4,
-  parameter logic        RST_LOW   = 1'b1,
-  parameter logic        RST_ASYNC = 1'b1,
-  parameter int unsigned NUM_PKTS  = 300,
-  parameter int unsigned INJ_PCT   = 60,   // chance per cycle a tile offers a packet
-  parameter int unsigned EJ_PCT    = 70    // chance per cycle a tile accepts a packet
+  parameter int unsigned ROWS           = 3,
+  parameter int unsigned COLS           = 4,
+  parameter int unsigned DATA_W         = 32,
+  parameter int unsigned BUF_DEPTH      = 4,
+  parameter int unsigned BUF_MEM_RD_DEL = 0,
+  parameter logic        ASYNC          = 1'b1,
+  parameter int unsigned CDC_DEPTH      = 4,
+  parameter int unsigned CDC_MEM_RD_DEL = 0,
+  parameter logic        RST_LOW        = 1'b1,
+  parameter logic        RST_ASYNC      = 1'b1,
+  parameter int unsigned NUM_PKTS       = 300,
+  parameter int unsigned INJ_PCT        = 60,   // chance per cycle a tile offers a packet
+  parameter int unsigned EJ_PCT         = 70    // chance per cycle a tile accepts a packet
 );
 
   localparam int unsigned NT  = ROWS * COLS;
@@ -81,14 +83,16 @@ module sh_noc_mesh_tb #(
   // ---------------------------------------------------------------------------
 
   sh_noc_mesh #(
-    .ROWS      (ROWS),
-    .COLS      (COLS),
-    .DATA_W    (DATA_W),
-    .BUF_DEPTH (BUF_DEPTH),
-    .ASYNC     (ASYNC),
-    .CDC_DEPTH (CDC_DEPTH),
-    .RST_LOW   (RST_LOW),
-    .RST_ASYNC (RST_ASYNC)
+    .ROWS           (ROWS),
+    .COLS           (COLS),
+    .DATA_W         (DATA_W),
+    .BUF_DEPTH      (BUF_DEPTH),
+    .BUF_MEM_RD_DEL (BUF_MEM_RD_DEL),
+    .ASYNC          (ASYNC),
+    .CDC_DEPTH      (CDC_DEPTH),
+    .CDC_MEM_RD_DEL (CDC_MEM_RD_DEL),
+    .RST_LOW        (RST_LOW),
+    .RST_ASYNC      (RST_ASYNC)
   ) u_dut (
     .clk             (clk),
     .rst             (rst),
@@ -151,41 +155,38 @@ module sh_noc_mesh_tb #(
 
       // Memories
       for (genvar p = 0; p < 6; p++) begin : g_buf_mem
-        sh_lib_beh_mem_mrnw #(.WIDTH(FW), .DEPTH(BUF_DEPTH), .RD_DEL(0)) u_mem (
-          .clk     (clk),
-          .rst     (rst),
+        sh_noc_tb_mem #(.WIDTH(FW), .DEPTH(BUF_DEPTH), .RD_DEL(BUF_MEM_RD_DEL)) u_mem (
+          .wr_clk  (clk),
           .wr_en   (buf_mem_wr_en[y][x][p]),
           .wr_addr (buf_mem_wr_addr[y][x][p]),
           .wr_data (buf_mem_wr_data[y][x][p]),
+          .rd_clk  (clk),
           .rd_en   (buf_mem_rd_en[y][x][p]),
           .rd_addr (buf_mem_rd_addr[y][x][p]),
-          .rd_data (buf_mem_rd_data[y][x][p]),
-          .rd_vld  ()
+          .rd_data (buf_mem_rd_data[y][x][p])
         );
       end
 
-      sh_lib_beh_mem_mrnw #(.WIDTH(FW), .DEPTH(CDC_DEPTH), .RD_DEL(0)) u_inj_mem (
-        .clk     (tile_side_clk),
-        .rst     (rst),
+      sh_noc_tb_mem #(.WIDTH(FW), .DEPTH(CDC_DEPTH), .RD_DEL(CDC_MEM_RD_DEL)) u_inj_mem (
+        .wr_clk  (tile_side_clk),
         .wr_en   (inj_mem_wr_en[y][x]),
         .wr_addr (inj_mem_wr_addr[y][x]),
         .wr_data (inj_mem_wr_data[y][x]),
+        .rd_clk  (clk),
         .rd_en   (inj_mem_rd_en[y][x]),
         .rd_addr (inj_mem_rd_addr[y][x]),
-        .rd_data (inj_mem_rd_data[y][x]),
-        .rd_vld  ()
+        .rd_data (inj_mem_rd_data[y][x])
       );
 
-      sh_lib_beh_mem_mrnw #(.WIDTH(DATA_W), .DEPTH(CDC_DEPTH), .RD_DEL(0)) u_ej_mem (
-        .clk     (clk),
-        .rst     (rst),
+      sh_noc_tb_mem #(.WIDTH(DATA_W), .DEPTH(CDC_DEPTH), .RD_DEL(CDC_MEM_RD_DEL)) u_ej_mem (
+        .wr_clk  (clk),
         .wr_en   (ej_mem_wr_en[y][x]),
         .wr_addr (ej_mem_wr_addr[y][x]),
         .wr_data (ej_mem_wr_data[y][x]),
+        .rd_clk  (tile_side_clk),
         .rd_en   (ej_mem_rd_en[y][x]),
         .rd_addr (ej_mem_rd_addr[y][x]),
-        .rd_data (ej_mem_rd_data[y][x]),
-        .rd_vld  ()
+        .rd_data (ej_mem_rd_data[y][x])
       );
 
       // Traffic source. Each tile drives its own signals, mapped onto the
@@ -255,8 +256,8 @@ module sh_noc_mesh_tb #(
     automatic int unsigned expected = NT * NUM_PKTS;
     automatic longint      cycles   = 0;
 
-    $display("sh_noc_mesh_tb: %0dx%0d mesh, ASYNC=%0d, BUF_DEPTH=%0d, %0d packets",
-             ROWS, COLS, ASYNC, BUF_DEPTH, expected);
+    $display("sh_noc_mesh_tb: %0dx%0d mesh, ASYNC=%0d, BUF_DEPTH=%0d, read latency buf/cdc=%0d/%0d, %0d packets",
+             ROWS, COLS, ASYNC, BUF_DEPTH, BUF_MEM_RD_DEL, CDC_MEM_RD_DEL, expected);
 
     #33ns rst_n = 1'b1;
 

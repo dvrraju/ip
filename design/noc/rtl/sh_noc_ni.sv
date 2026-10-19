@@ -1,44 +1,47 @@
 // sh_noc_ni: network interface between a tile and its router's Local port
 //
 // Parameters:
-//   X_W, Y_W   - widths of the destination x / y fields in a flit
-//   DATA_W     - payload width in bits
-//   BUF_DEPTH  - router input buffer depth (credits for the inject link) and
-//                depth of the eject buffer here
-//   ASYNC      - 1 = tile_clk is asynchronous to clk (dual-clock FIFOs)
-//                0 = tile_clk/tile_rst are ignored; the tile runs on clk/rst
-//   CDC_DEPTH  - entries in each tile-side FIFO (power of 2 >= 2 when ASYNC)
-//   SYNC_DELAY - synchronizer flops per pointer crossing (ASYNC = 1 only)
-//   RST_LOW    - reset sense: 1 = active-low, 0 = active-high
-//   RST_ASYNC  - reset type:  1 = asynchronous, 0 = synchronous
-//   FW, BAW, CAW - flit width / eject buffer and CDC FIFO address widths
-//                (derived, do not override)
+//   X_W, Y_W       - widths of the destination x / y fields in a flit
+//   DATA_W         - payload width in bits
+//   BUF_DEPTH      - router input buffer depth (credits for the inject link) and
+//                    depth of the eject buffer here
+//   BUF_MEM_RD_DEL - eject buffer memory read latency (clk); 0 = combinational
+//   ASYNC          - 1 = tile_clk is asynchronous to clk (dual-clock FIFOs)
+//                    0 = tile_clk/tile_rst are ignored; the tile runs on clk/rst
+//   CDC_DEPTH      - entries in each tile-side FIFO (power of 2 >= 2 when ASYNC)
+//   SYNC_DELAY     - synchronizer flops per pointer crossing (ASYNC = 1 only)
+//   CDC_MEM_RD_DEL - CDC FIFO memory read latency, in the read side's clock
+//   RST_LOW        - reset sense: 1 = active-low, 0 = active-high
+//   RST_ASYNC      - reset type:  1 = asynchronous, 0 = synchronous
+//   FW, BAW, CAW   - flit width / eject buffer and CDC FIFO address widths
+//                    (derived, do not override)
 //
 // Tile side (tile_clk): valid/ready inject of {dst_y, dst_x, data} and
 // valid/ready eject of data. The packet carries no source; put it in the
 // payload if the receiver needs it.
 // NoC side (clk): credit-based links to and from the router's Local port.
 //
-// Storage is external; each memory has one write port and one combinational
-// read port:
+// Storage is external; each memory has one write port and one read port:
 //   ejb_mem_* - eject buffer,   BUF_DEPTH x FW,     write clk,      read clk
 //   inj_mem_* - inject FIFO,    CDC_DEPTH x FW,     write tile_clk, read clk
 //   ej_mem_*  - eject FIFO,     CDC_DEPTH x DATA_W, write clk,      read tile_clk
 // (with ASYNC = 0 every memory is on clk)
 
 module sh_noc_ni #(
-  parameter int unsigned X_W        = 2,
-  parameter int unsigned Y_W        = 2,
-  parameter int unsigned DATA_W     = 32,
-  parameter int unsigned BUF_DEPTH  = 4,
-  parameter logic        ASYNC      = 1'b1,
-  parameter int unsigned CDC_DEPTH  = 4,
-  parameter int unsigned SYNC_DELAY = 2,
-  parameter logic        RST_LOW    = 1'b1,
-  parameter logic        RST_ASYNC  = 1'b1,
-  parameter int unsigned FW         = Y_W + X_W + DATA_W,
-  parameter int unsigned BAW        = (BUF_DEPTH > 1) ? $clog2(BUF_DEPTH) : 1,
-  parameter int unsigned CAW        = (CDC_DEPTH > 1) ? $clog2(CDC_DEPTH) : 1
+  parameter int unsigned X_W            = 2,
+  parameter int unsigned Y_W            = 2,
+  parameter int unsigned DATA_W         = 32,
+  parameter int unsigned BUF_DEPTH      = 4,
+  parameter int unsigned BUF_MEM_RD_DEL = 0,
+  parameter logic        ASYNC          = 1'b1,
+  parameter int unsigned CDC_DEPTH      = 4,
+  parameter int unsigned SYNC_DELAY     = 2,
+  parameter int unsigned CDC_MEM_RD_DEL = 0,
+  parameter logic        RST_LOW        = 1'b1,
+  parameter logic        RST_ASYNC      = 1'b1,
+  parameter int unsigned FW             = Y_W + X_W + DATA_W,
+  parameter int unsigned BAW            = (BUF_DEPTH > 1) ? $clog2(BUF_DEPTH) : 1,
+  parameter int unsigned CAW            = (CDC_DEPTH > 1) ? $clog2(CDC_DEPTH) : 1
 ) (
   // NoC domain
   input  logic              clk,
@@ -101,6 +104,7 @@ module sh_noc_ni #(
     .DEPTH      (CDC_DEPTH),
     .ASYNC      (ASYNC),
     .SYNC_DELAY (SYNC_DELAY),
+    .MEM_RD_DEL (CDC_MEM_RD_DEL),
     .RST_LOW    (RST_LOW),
     .RST_ASYNC  (RST_ASYNC)
   ) u_inj_fifo (
@@ -170,10 +174,11 @@ module sh_noc_ni #(
   /* verilator lint_on UNUSEDSIGNAL */
 
   sh_noc_in_buf #(
-    .WIDTH     (FW),
-    .DEPTH     (BUF_DEPTH),
-    .RST_LOW   (RST_LOW),
-    .RST_ASYNC (RST_ASYNC)
+    .WIDTH      (FW),
+    .DEPTH      (BUF_DEPTH),
+    .MEM_RD_DEL (BUF_MEM_RD_DEL),
+    .RST_LOW    (RST_LOW),
+    .RST_ASYNC  (RST_ASYNC)
   ) u_ej_buf (
     .clk         (clk),
     .rst         (rst),
@@ -196,6 +201,7 @@ module sh_noc_ni #(
     .DEPTH      (CDC_DEPTH),
     .ASYNC      (ASYNC),
     .SYNC_DELAY (SYNC_DELAY),
+    .MEM_RD_DEL (CDC_MEM_RD_DEL),
     .RST_LOW    (RST_LOW),
     .RST_ASYNC  (RST_ASYNC)
   ) u_ej_fifo (

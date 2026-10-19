@@ -7,7 +7,7 @@
 
 ROOT    := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../../..)
 RTL     := $(shell find $(ROOT)/design -path '*/rtl/*.sv' | sort)
-TB      := $(ROOT)/design/noc/tb/sh_noc_mesh_tb.sv
+TB      := $(ROOT)/design/noc/tb/sh_noc_tb_mem.sv $(ROOT)/design/noc/tb/sh_noc_mesh_tb.sv
 PARAMS  ?=
 SEED    ?= 1
 OBJ     := obj_dir
@@ -27,7 +27,11 @@ regress:
 	for p in "" "-GASYNC=0" "-GROWS=1 -GCOLS=1" "-GROWS=1 -GCOLS=5" \
 	         "-GROWS=4 -GCOLS=4 -GBUF_DEPTH=2 -GCDC_DEPTH=2" \
 	         "-GROWS=2 -GCOLS=3 -GRST_LOW=0 -GRST_ASYNC=0" \
-	         "-GROWS=4 -GCOLS=4 -GINJ_PCT=100 -GEJ_PCT=100"; do \
+	         "-GROWS=4 -GCOLS=4 -GINJ_PCT=100 -GEJ_PCT=100" \
+	         "-GBUF_MEM_RD_DEL=1 -GCDC_MEM_RD_DEL=1" \
+	         "-GBUF_MEM_RD_DEL=2 -GCDC_MEM_RD_DEL=3 -GBUF_DEPTH=7" \
+	         "-GASYNC=0 -GBUF_MEM_RD_DEL=1 -GCDC_MEM_RD_DEL=2 -GBUF_DEPTH=1 -GCDC_DEPTH=1" \
+	         "-GROWS=4 -GCOLS=4 -GBUF_MEM_RD_DEL=1 -GBUF_DEPTH=6 -GINJ_PCT=100 -GEJ_PCT=100"; do \
 	  for s in 1 2 3; do \
 	    out=$$($(MAKE) -s sim PARAMS="$$p" SEED=$$s OBJ=obj_dir_regress 2>&1); \
 	    echo "PARAMS=\"$$p\" SEED=$$s: $$(echo "$$out" | grep -E '^(PASS|FAIL)')"; \
