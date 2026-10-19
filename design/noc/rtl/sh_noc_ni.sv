@@ -3,6 +3,8 @@
 //
 // Parameters:
 //   X, Y           - this tile's coordinates
+//   IS_L2          - 1 = the L2 cache is this tile's agent: its requests
+//                    (fills, writebacks) always go to the region owner
 //   BUF_DEPTH      - router input buffer depth (credits for the inject links)
 //                    and depth of the two eject buffers here
 //   BUF_MEM_RD_DEL - eject buffer memory read latency (clk); 0 = combinational
@@ -19,9 +21,11 @@
 // Tile side (tile_clk), all valid/ready flit streams in the sh_noc_pkg format:
 //   i_req - initiator requests out. The NI decodes each header's addr with
 //           the address map and fills in dst and src; the tile's values for
-//           those fields are ignored. A request to an unmapped address is
-//           dropped here (with its data flits) and answered on i_rsp with a
-//           header-only response with status RSP_DECERR.
+//           those fields are ignored. dst is the region owner, or the L2 tile
+//           for a cacheable region when an L2 is present and this is not the
+//           L2's NI. A request to an unmapped address is dropped here (with
+//           its data flits) and answered on i_rsp with a header-only response
+//           with status RSP_DECERR.
 //   i_rsp - responses to the initiator.
 //   t_req - requests to this tile as a target.
 //   t_rsp - target responses out. The tile sets dst (the request's src); the
@@ -44,6 +48,7 @@ module sh_noc_ni
 #(
   parameter int unsigned X              = 0,
   parameter int unsigned Y              = 0,
+  parameter logic        IS_L2          = 1'b0,
   parameter int unsigned BUF_DEPTH      = 4,
   parameter int unsigned BUF_MEM_RD_DEL = 0,
   parameter logic        ASYNC          = 1'b1,
@@ -170,9 +175,14 @@ module sh_noc_ni
   assign ireq_drop = ireq_flit.head ? !ireq_dec.hit : drop_q;
 
   always_comb begin
-    ireq_hdr_out       = ireq_hdr;
-    ireq_hdr_out.dst_x = ireq_dec.x;
-    ireq_hdr_out.dst_y = ireq_dec.y;
+    ireq_hdr_out = ireq_hdr;
+    if (L2_PRESENT && !IS_L2 && ireq_dec.cacheable) begin
+      ireq_hdr_out.dst_x = X_W'(L2_X);
+      ireq_hdr_out.dst_y = Y_W'(L2_Y);
+    end else begin
+      ireq_hdr_out.dst_x = ireq_dec.x;
+      ireq_hdr_out.dst_y = ireq_dec.y;
+    end
     ireq_hdr_out.src_x = X_W'(X);
     ireq_hdr_out.src_y = Y_W'(Y);
   end
@@ -180,6 +190,7 @@ module sh_noc_ni
   assign req_tx_vld       = ireq_vld && !ireq_drop;
   assign req_tx_flit.head = ireq_flit.head;
   assign req_tx_flit.tail = ireq_flit.tail;
+  assign req_tx_flit.strb = ireq_flit.strb;
   assign req_tx_flit.data = ireq_flit.head ? hdr_to_data(ireq_hdr_out) : ireq_flit.data;
 
   // A rejected header waits until the previous DECERR response has gone
@@ -232,7 +243,7 @@ module sh_noc_ni
     .clk (clk),
     .rst (1'b0),
     .en  (err_set),
-    .d   ({1'b1, 1'b1, hdr_to_data(err_hdr)}),
+    .d   ({1'b1, 1'b1, STRB_W'(0), hdr_to_data(err_hdr)}),
     .q   (err_flit)
   );
 
@@ -437,6 +448,7 @@ module sh_noc_ni
 
   assign rsp_tx_flit.head = trsp_flit.head;
   assign rsp_tx_flit.tail = trsp_flit.tail;
+  assign rsp_tx_flit.strb = trsp_flit.strb;
   assign rsp_tx_flit.data = trsp_flit.head ? hdr_to_data(trsp_hdr_out) : trsp_flit.data;
 
   sh_noc_tx #(

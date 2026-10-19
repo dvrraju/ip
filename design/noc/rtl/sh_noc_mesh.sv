@@ -16,7 +16,9 @@
 //   BAW, CAW       - buffer and CDC FIFO address widths (derived, do not
 //                    override)
 //
-// Each tile (y, x) is an initiator and a target (see sh_noc_ni):
+// Each tile (y, x) is an initiator and a target (see sh_noc_ni). With
+// L2_PRESENT, tile (L2_Y, L2_X) is the L2 cache: it receives agents' requests
+// to cacheable regions and sends its fills and writebacks to the owners.
 //   i_req_* - requests out, addressed by the system address map
 //   i_rsp_* - responses back, one per request
 //   t_req_* - requests in
@@ -167,6 +169,7 @@ module sh_noc_mesh
       sh_noc_ni #(
         .X              (x),
         .Y              (y),
+        .IS_L2          (L2_PRESENT && x == L2_X && y == L2_Y),
         .BUF_DEPTH      (BUF_DEPTH),
         .BUF_MEM_RD_DEL (BUF_MEM_RD_DEL),
         .ASYNC          (ASYNC),

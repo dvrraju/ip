@@ -8,9 +8,12 @@
 // NI replaces them. Each response is checked against its tag: type, len,
 // source tile (the target, or itself for DECERR), status, and read data.
 //
-// Target: checks each request arrived at the tile its address maps to, and
-// its write data; then returns one response (read data for reads). Response
-// src is filled with junk to check that the NI stamps it.
+// Target: checks each request arrived at the right tile (the address's owner,
+// or the L2 tile for a cacheable address when an L2 is present and the
+// sender is not the L2 tile), and its write data and strobes; then returns
+// one response (read data for reads). Response src is filled with junk to
+// check that the NI stamps it. The L2 tile is modelled here as an ordinary
+// tile; this test checks routing only.
 //
 // Write data and read data are functions of (source, tag, address, beat), so
 // both ends can check without sharing state. The test passes when every
@@ -58,8 +61,20 @@ module sh_noc_mesh_tb
     return FLIT_W'({~32'(addr), 16'hDA7A, 16'(beat)});
   endfunction
 
+  function automatic logic [STRB_W-1:0] wr_strb(int unsigned src, int unsigned tag, int unsigned beat);
+    return STRB_W'((src * 7 + tag * 13 + beat * 29) ^ 32'h5A5A_5A5A);
+  endfunction
+
   function automatic int unsigned tile_id(logic [X_W-1:0] x, logic [Y_W-1:0] y);
     return 32'(y) * COLS + 32'(x);
+  endfunction
+
+  // Tile a mapped request from src to addr is delivered to
+  function automatic int unsigned route(int unsigned src, logic [ADDR_W-1:0] addr);
+    addr_dec_t dec;
+    dec = addr_decode(addr);
+    if (L2_PRESENT && src != L2_TILE && dec.cacheable) return L2_TILE;
+    return tile_id(dec.x, dec.y);
   endfunction
 
   // Random address that is (or is not) in the address map
@@ -286,14 +301,15 @@ module sh_noc_mesh_tb
               txn[tag].len    = h.len;
               txn[tag].addr   = h.addr;
               txn[tag].mapped = dec.hit;
-              txn[tag].target = dec.hit ? tile_id(dec.x, dec.y) : T;
+              txn[tag].target = dec.hit ? route(T, h.addr) : T;
               n_issued++;
               if (dec.hit) issued_mapped++;
 
-              ireq_q.push_back('{head: 1'b1, tail: (h.typ == PKT_RD_REQ), data: hdr_to_data(h)});
+              ireq_q.push_back('{head: 1'b1, tail: (h.typ == PKT_RD_REQ), strb: '0,
+                                 data: hdr_to_data(h)});
               if (h.typ == PKT_WR_REQ) begin
                 for (int i = 0; i <= 32'(h.len); i++) begin
-                  ireq_q.push_back('{head: 1'b0, tail: (i == 32'(h.len)),
+                  ireq_q.push_back('{head: 1'b0, tail: (i == 32'(h.len)), strb: wr_strb(T, tag, i),
                                      data: wr_data(T, tag, h.addr, i)});
                 end
               end
@@ -392,7 +408,7 @@ module sh_noc_mesh_tb
               treq_beat = 0;
               if (!f.head) begin
                 $error("tile %0d: request flit without a header", T); errors++;
-              end else if (!dec.hit || 32'(dec.x) != x || 32'(dec.y) != y
+              end else if (!dec.hit || route(tile_id(treq_hdr.src_x, treq_hdr.src_y), treq_hdr.addr) != T
                            || 32'(treq_hdr.dst_x) != x || 32'(treq_hdr.dst_y) != y) begin
                 $error("tile %0d: request for address %h delivered here", T, treq_hdr.addr); errors++;
               end else if (tile_id(treq_hdr.src_x, treq_hdr.src_y) >= NT) begin
@@ -406,6 +422,7 @@ module sh_noc_mesh_tb
             end else begin
               if (f.head || f.data != wr_data(tile_id(treq_hdr.src_x, treq_hdr.src_y),
                                               treq_hdr.tag, treq_hdr.addr, treq_beat)
+                  || f.strb != wr_strb(tile_id(treq_hdr.src_x, treq_hdr.src_y), treq_hdr.tag, treq_beat)
                   || f.tail != (treq_beat == 32'(treq_hdr.len))) begin
                 $error("tile %0d: bad write data beat %0d from tile %0d tag %0d", T, treq_beat,
                        tile_id(treq_hdr.src_x, treq_hdr.src_y), treq_hdr.tag);
@@ -426,10 +443,11 @@ module sh_noc_mesh_tb
               r.len    = treq_hdr.len;
               r.status = RSP_OK;
               r.addr   = '0;
-              trsp_q.push_back('{head: 1'b1, tail: (r.typ == PKT_WR_RSP), data: hdr_to_data(r)});
+              trsp_q.push_back('{head: 1'b1, tail: (r.typ == PKT_WR_RSP), strb: '0,
+                                 data: hdr_to_data(r)});
               if (r.typ == PKT_RD_RSP) begin
                 for (int i = 0; i <= 32'(r.len); i++) begin
-                  trsp_q.push_back('{head: 1'b0, tail: (i == 32'(r.len)),
+                  trsp_q.push_back('{head: 1'b0, tail: (i == 32'(r.len)), strb: '0,
                                      data: rd_data(treq_hdr.addr, i)});
                 end
               end
@@ -463,9 +481,9 @@ module sh_noc_mesh_tb
     automatic int unsigned expected = NT * NUM_TXN;
     automatic longint      cycles   = 0;
 
-    $display("sh_noc_mesh_tb: %0dx%0d mesh, FLIT_W=%0d, MAX_LEN=%0d, TAG_W=%0d, ASYNC=%0d, BUF_DEPTH=%0d, read latency buf/cdc=%0d/%0d, %0d transactions",
-             ROWS, COLS, FLIT_W, MAX_LEN, TAG_W, ASYNC, BUF_DEPTH, BUF_MEM_RD_DEL,
-             CDC_MEM_RD_DEL, expected);
+    $display("sh_noc_mesh_tb: %0dx%0d mesh, L2 %0s, FLIT_W=%0d, MAX_LEN=%0d, TAG_W=%0d, ASYNC=%0d, BUF_DEPTH=%0d, read latency buf/cdc=%0d/%0d, %0d transactions",
+             ROWS, COLS, L2_PRESENT ? $sformatf("at tile %0d", L2_TILE) : "absent", FLIT_W, MAX_LEN,
+             TAG_W, ASYNC, BUF_DEPTH, BUF_MEM_RD_DEL, CDC_MEM_RD_DEL, expected);
 
     #33ns rst_n = 1'b1;
 

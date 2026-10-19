@@ -10,7 +10,8 @@
 # MAX_LEN, TAG_W).
 
 ROOT    := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../../..)
-PKG     := $(ROOT)/design/ip_top/pkg/ip_top_pkg.sv $(ROOT)/design/noc/pkg/sh_noc_pkg.sv
+PKG     := $(ROOT)/design/ip_top/pkg/ip_top_pkg.sv $(ROOT)/design/noc/pkg/sh_noc_pkg.sv \
+           $(ROOT)/design/l2/pkg/sh_l2_pkg.sv
 RTL     := $(PKG) $(shell find $(ROOT)/design -path '*/rtl/*.sv' | sort)
 TB      := $(ROOT)/design/noc/tb/sh_noc_tb_mem.sv $(ROOT)/design/noc/tb/sh_noc_mesh_tb.sv
 PARAMS  ?=
@@ -41,7 +42,9 @@ regress:
 	         "-GUNMAPPED_PCT=60 -GRX_PCT=20" \
 	         "-GBUF_MEM_RD_DEL=1 -GCDC_MEM_RD_DEL=1" \
 	         "-GBUF_MEM_RD_DEL=2 -GCDC_MEM_RD_DEL=3 -GBUF_DEPTH=7" \
-	         "-GASYNC=0 -GBUF_MEM_RD_DEL=1 -GCDC_MEM_RD_DEL=2 -GBUF_DEPTH=1 -GCDC_DEPTH=1"; do \
+	         "-GASYNC=0 -GBUF_MEM_RD_DEL=1 -GCDC_MEM_RD_DEL=2 -GBUF_DEPTH=1 -GCDC_DEPTH=1" \
+	         "+define+SH_NOC_L2_PRESENT=0" \
+	         "+define+SH_NOC_ROWS=3 +define+SH_NOC_COLS=5 +define+SH_NOC_L2_X=0 +define+SH_NOC_L2_Y=2"; do \
 	  for s in 1 2 3; do \
 	    out=$$($(MAKE) -s sim PARAMS="$$p" SEED=$$s OBJ=obj_dir_regress 2>&1); \
 	    echo "PARAMS=\"$$p\" SEED=$$s: $$(echo "$$out" | grep -E '^(PASS|FAIL)')"; \
