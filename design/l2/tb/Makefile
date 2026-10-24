@@ -52,7 +52,13 @@ regress:
 	         "$(SMALL) -GBAD_MOD=0 -GFULL_PCT=40" \
 	         "-GNUM_REQ=3000 -GSPAN_LINES=4096" \
 	         "-GNUM_REQ=3000 -GSPAN_LINES=40000 -GDATA_RD_DEL=2" \
-	         "-GNUM_REQ=3000 -GSPAN_LINES=24 -GSTRIDE=2048 -GTAG_RD_DEL=1 -GLRU_RD_DEL=2"; do \
+	         "-GNUM_REQ=3000 -GSPAN_LINES=24 -GSTRIDE=2048 -GTAG_RD_DEL=1 -GLRU_RD_DEL=2" \
+	         "$(SMALL) -GPF_RD_DEL=2 -GDATA_RD_DEL=1" \
+	         "$(SMALL) +define+SH_L2_PF_DEPTH=2" \
+	         "$(SMALL) +define+SH_L2_PF_DEPTH=4 -GPF_RD_DEL=1" \
+	         "$(SMALL) -GSPAN_LINES=2 -GBAD_MOD=0" \
+	         "$(SMALL) -GSPAN_LINES=6 -GMEM_DLY=100 -GRX_PCT=30" \
+	         "$(SMALL) -GMAX_OUT=1"; do \
 	  for s in 1 2 3; do \
 	    out=$$($(MAKE) -s sim PARAMS="$$p" SEED=$$s OBJ=obj_dir_regress 2>&1); \
 	    echo "PARAMS=\"$$p\" SEED=$$s: $$(echo "$$out" | grep -E '^(PASS|FAIL)')"; \

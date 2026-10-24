@@ -24,17 +24,17 @@ module sh_l2_sys_tb
   import sh_noc_pkg::*;
   import sh_l2_pkg::*;
 #(
-  parameter int unsigned BUF_DEPTH      = 4,
-  parameter logic        ASYNC          = 1'b1,
-  parameter int unsigned CDC_DEPTH      = 4,
-  parameter int unsigned L2_RD_DEL      = 0,    // read latency of all three L2 arrays
-  parameter int unsigned NUM_TXN        = 150,  // transactions per agent
-  parameter int unsigned SPAN_LINES     = 16,   // lines used at the start of each region
-  parameter int unsigned UNMAPPED_PCT   = 3,
-  parameter int unsigned CROSS_PCT      = 3,    // cacheable requests that cross a line
-  parameter int unsigned TX_PCT         = 80,
-  parameter int unsigned RX_PCT         = 80,
-  parameter int unsigned MEM_DLY        = 4
+  parameter int unsigned BUF_DEPTH    = 4,
+  parameter logic        ASYNC        = 1'b1,
+  parameter int unsigned CDC_DEPTH    = 4,
+  parameter int unsigned L2_RD_DEL    = 0,    // read latency of all L2 memories
+  parameter int unsigned NUM_TXN      = 150,  // transactions per agent
+  parameter int unsigned SPAN_LINES   = 16,   // lines used at the start of each region
+  parameter int unsigned UNMAPPED_PCT = 3,
+  parameter int unsigned CROSS_PCT    = 3,    // cacheable requests that cross a line
+  parameter int unsigned TX_PCT       = 80,
+  parameter int unsigned RX_PCT       = 80,
+  parameter int unsigned MEM_DLY      = 4
 );
 
   localparam int unsigned NT    = NUM_TILES;
@@ -175,7 +175,7 @@ module sh_l2_sys_tb
       for (genvar n = 0; n < 2; n++) begin : g_net
         for (genvar p = 0; p < 6; p++) begin : g_buf
           sh_noc_tb_mem #(.WIDTH(FLIT_LINK_W), .DEPTH(BUF_DEPTH)) u_mem (
-            .wr_clk (clk), .wr_en (buf_mem_wr_en[y][x][n][p]), .wr_addr (buf_mem_wr_addr[y][x][n][p]),
+            .wr_clk  (clk), .wr_en (buf_mem_wr_en[y][x][n][p]), .wr_addr (buf_mem_wr_addr[y][x][n][p]),
             .wr_data (buf_mem_wr_data[y][x][n][p]), .rd_clk (clk), .rd_en (buf_mem_rd_en[y][x][n][p]),
             .rd_addr (buf_mem_rd_addr[y][x][n][p]), .rd_data (buf_mem_rd_data[y][x][n][p])
           );
@@ -184,7 +184,7 @@ module sh_l2_sys_tb
       for (genvar f = 0; f < 4; f++) begin : g_cdc
         localparam bit FROM_TILE = (f == 0 || f == 3);
         sh_noc_tb_mem #(.WIDTH(FLIT_LINK_W), .DEPTH(CDC_DEPTH)) u_mem (
-          .wr_clk (FROM_TILE ? tsc : clk), .wr_en (cdc_mem_wr_en[y][x][f]), .wr_addr (cdc_mem_wr_addr[y][x][f]),
+          .wr_clk  (FROM_TILE ? tsc : clk), .wr_en (cdc_mem_wr_en[y][x][f]), .wr_addr (cdc_mem_wr_addr[y][x][f]),
           .wr_data (cdc_mem_wr_data[y][x][f]), .rd_clk (FROM_TILE ? clk : tsc), .rd_en (cdc_mem_rd_en[y][x][f]),
           .rd_addr (cdc_mem_rd_addr[y][x][f]), .rd_data (cdc_mem_rd_data[y][x][f])
         );
@@ -202,6 +202,10 @@ module sh_l2_sys_tb
         logic [FLIT_W-1:0]    data_wr_data, data_rd_data;
         logic [STRB_W-1:0]    data_wr_strb;
         logic [LRU_W-1:0]     lru_wr_data, lru_rd_data;
+        logic                   pf_wr_en, pf_rd_en;
+        logic [PF_IW-1:0]       pf_wr_addr, pf_rd_addr;
+        logic [PF_ENTRY_W-1:0] pf_wr_data, pf_rd_data;
+        logic [PF_SLOTS-1:0]    pf_wr_mask;
         logic                 wb_err;
         logic                 rq_rdy, rp_vld, iq_vld, ip_rdy;
         flit_t                rp_flit, iq_flit;
@@ -216,7 +220,8 @@ module sh_l2_sys_tb
         sh_l2 #(
           .TAG_RD_DEL  (L2_RD_DEL),
           .DATA_RD_DEL (L2_RD_DEL),
-          .LRU_RD_DEL  (L2_RD_DEL)
+          .LRU_RD_DEL  (L2_RD_DEL),
+          .PF_RD_DEL   (L2_RD_DEL)
         ) u_l2 (
           .clk              (tsc),
           .rst              (rst_n),
@@ -252,21 +257,32 @@ module sh_l2_sys_tb
           .lru_mem_rd_en    (lru_rd_en),
           .lru_mem_rd_addr  (lru_rd_addr),
           .lru_mem_rd_data  (lru_rd_data),
+          .pf_mem_wr_en     (pf_wr_en),
+          .pf_mem_wr_addr   (pf_wr_addr),
+          .pf_mem_wr_data   (pf_wr_data),
+          .pf_mem_wr_mask   (pf_wr_mask),
+          .pf_mem_rd_en     (pf_rd_en),
+          .pf_mem_rd_addr   (pf_rd_addr),
+          .pf_mem_rd_data   (pf_rd_data),
           .wb_err           (wb_err),
           .wb_err_clr       (1'b0)
         );
 
         sh_l2_tb_mem #(.WIDTH(TAG_ROW_W), .DEPTH(NUM_SETS), .MASK_W(NUM_WAYS), .RD_DEL(L2_RD_DEL)) u_tag (
-          .clk (tsc), .wr_en (tag_wr_en), .wr_addr (tag_wr_addr), .wr_data (tag_wr_data), .wr_mask (tag_wr_mask),
+          .clk   (tsc), .wr_en (tag_wr_en), .wr_addr (tag_wr_addr), .wr_data (tag_wr_data), .wr_mask (tag_wr_mask),
           .rd_en (tag_rd_en), .rd_addr (tag_rd_addr), .rd_data (tag_rd_data)
         );
         sh_l2_tb_mem #(.WIDTH(FLIT_W), .DEPTH(NUM_SETS * NUM_WAYS * WORDS), .MASK_W(STRB_W), .RD_DEL(L2_RD_DEL)) u_data (
-          .clk (tsc), .wr_en (data_wr_en), .wr_addr (data_wr_addr), .wr_data (data_wr_data), .wr_mask (data_wr_strb),
+          .clk   (tsc), .wr_en (data_wr_en), .wr_addr (data_wr_addr), .wr_data (data_wr_data), .wr_mask (data_wr_strb),
           .rd_en (data_rd_en), .rd_addr (data_rd_addr), .rd_data (data_rd_data)
         );
         sh_l2_tb_mem #(.WIDTH(LRU_W), .DEPTH(NUM_SETS), .MASK_W(1), .RD_DEL(L2_RD_DEL)) u_lru (
-          .clk (tsc), .wr_en (lru_wr_en), .wr_addr (lru_wr_addr), .wr_data (lru_wr_data), .wr_mask (1'b1),
+          .clk   (tsc), .wr_en (lru_wr_en), .wr_addr (lru_wr_addr), .wr_data (lru_wr_data), .wr_mask (1'b1),
           .rd_en (lru_rd_en), .rd_addr (lru_rd_addr), .rd_data (lru_rd_data)
+        );
+        sh_l2_tb_mem #(.WIDTH(PF_ENTRY_W), .DEPTH(PF_DEPTH), .MASK_W(PF_SLOTS), .RD_DEL(L2_RD_DEL)) u_pf (
+          .clk   (tsc), .wr_en (pf_wr_en), .wr_addr (pf_wr_addr), .wr_data (pf_wr_data), .wr_mask (pf_wr_mask),
+          .rd_en (pf_rd_en), .rd_addr (pf_rd_addr), .rd_data (pf_rd_data)
         );
 
         always @(posedge tsc) begin
