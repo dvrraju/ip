@@ -1,9 +1,11 @@
-// sh_l2: unified, transparent, write-back L2 cache (version 1, blocking)
+// sh_l2: unified, transparent, write-back L2 cache (version 2: hit-under-miss,
+// multiple outstanding misses)
 //
 // Parameters:
 //   TAG_RD_DEL  - tag array read latency in clk cycles; 0 = combinational
 //   DATA_RD_DEL - data array read latency
 //   LRU_RD_DEL  - LRU array read latency
+//   PF_RD_DEL   - pending FIFO memory read latency
 //   RST_LOW     - reset sense: 1 = active-low, 0 = active-high
 //   RST_ASYNC   - reset type:  1 = asynchronous, 0 = synchronous
 //
@@ -12,11 +14,17 @@
 // regions, and their responses) and i_req/i_rsp (fills and writebacks to the
 // region owners). See design/l2/doc/l2_spec.md and l2_uarch.md.
 //
-// Requests are served one at a time, in arrival order: a hit, or a miss
-// (writeback of a dirty victim, fill, install, replay as a hit). Writes are
-// write-back and write-allocate; a write of a whole line with every strobe
-// set allocates without a fill. A request that crosses a line, or a fill that
-// returns an error, gets a header-only RSP_SLVERR response.
+// Requests wait in a pending FIFO of PF_DEPTH entries (t_req stalls when
+// it is full). The pipeline takes the oldest entry that is ready: hits are
+// served while misses are outstanding, up to PF_DEPTH misses can be
+// outstanding, and requests to the same line complete in arrival order;
+// responses to different lines may complete out of order. A miss writes back
+// a dirty victim, fills the line, installs it and replays as a hit. Writes
+// are write-back and write-allocate; a write of a whole line with every
+// strobe set allocates without a fill. A request that crosses a line, or a
+// fill that returns an error, gets a header-only RSP_SLVERR response.
+// Memory may answer fills and writebacks in any order (they are tagged with
+// the entry index); a line is not refilled before its writeback completes.
 //
 // No memories are instantiated here. Each array is a 1R1W memory port: a
 // write happens on the clk edge when *_wr_en is high; *_rd_data is the entry
@@ -27,6 +35,9 @@
 //   data_mem_* - NUM_SETS * NUM_WAYS * WORDS x FLIT_W, address {set, way,
 //                word}; wr_strb selects the bytes written
 //   lru_mem_*  - NUM_SETS x LRU_W tree pseudo-LRU bits
+//   pf_mem_*  - PF_DEPTH x PF_ENTRY_W pending FIFO; an entry is
+//                PF_SLOTS slots of SLOT_W bits (slot 0 the header, slot 1 + i
+//                data flit i as {strb, data}); wr_mask selects the slots
 //
 // wb_err is set when a writeback returns an error (the dirty data is lost)
 // and stays set until wb_err_clr is pulsed or reset.
@@ -38,6 +49,7 @@ module sh_l2
   parameter int unsigned TAG_RD_DEL  = 0,
   parameter int unsigned DATA_RD_DEL = 0,
   parameter int unsigned LRU_RD_DEL  = 0,
+  parameter int unsigned PF_RD_DEL   = 0,
   parameter logic        RST_LOW     = 1'b1,
   parameter logic        RST_ASYNC   = 1'b1
 ) (
@@ -80,6 +92,14 @@ module sh_l2
   output logic                 lru_mem_rd_en,
   output logic [SET_W-1:0]     lru_mem_rd_addr,
   input  logic [LRU_W-1:0]     lru_mem_rd_data,
+  // Pending FIFO
+  output logic                   pf_mem_wr_en,
+  output logic [PF_IW-1:0]       pf_mem_wr_addr,
+  output logic [PF_ENTRY_W-1:0] pf_mem_wr_data,
+  output logic [PF_SLOTS-1:0]    pf_mem_wr_mask,
+  output logic                   pf_mem_rd_en,
+  output logic [PF_IW-1:0]       pf_mem_rd_addr,
+  input  logic [PF_ENTRY_W-1:0] pf_mem_rd_data,
   // Status
   output logic                 wb_err,
   input  logic                 wb_err_clr
@@ -92,49 +112,69 @@ module sh_l2
     $error("sh_l2: NUM_WAYS must be a power of 2 >= 2, got %0d", NUM_WAYS);
   end
 
-  logic                         req_vld;
-  hdr_t                         req_hdr;
-  logic                         req_bad;
-  logic                         req_full;
-  logic [WORDS-1:0][FLIT_W-1:0] wbuf_data;
-  logic [WORDS-1:0][STRB_W-1:0] wbuf_strb;
-  logic                         req_done;
-  logic                         wb_err_evt;
+  ent_t [PF_DEPTH-1:0] ent;
+  logic [PF_IW-1:0]     head;
+  logic                 upd_en;
+  logic [PF_IW-1:0]     upd_idx;
+  ent_t                 upd_ent;
+  logic                 inst_en;
+  logic [PF_IW-1:0]     inst_idx;
+  logic                 inst_err;
+  logic                 wbr_en;
+  logic [PF_IW-1:0]     wbr_idx;
+  logic                 release_en;
+  logic                 wb_err_evt;
 
-  sh_l2_intake #(
+  sh_l2_pfifo #(
     .RST_LOW   (RST_LOW),
     .RST_ASYNC (RST_ASYNC)
-  ) u_intake (
-    .clk        (clk),
-    .rst        (rst),
-    .t_req_vld  (t_req_vld),
-    .t_req_rdy  (t_req_rdy),
-    .t_req_flit (t_req_flit),
-    .req_vld    (req_vld),
-    .req_hdr    (req_hdr),
-    .req_bad    (req_bad),
-    .req_full   (req_full),
-    .wbuf_data  (wbuf_data),
-    .wbuf_strb  (wbuf_strb),
-    .req_done   (req_done)
+  ) u_pfifo (
+    .clk            (clk),
+    .rst            (rst),
+    .t_req_vld      (t_req_vld),
+    .t_req_rdy      (t_req_rdy),
+    .t_req_flit     (t_req_flit),
+    .pf_mem_wr_en   (pf_mem_wr_en),
+    .pf_mem_wr_addr (pf_mem_wr_addr),
+    .pf_mem_wr_data (pf_mem_wr_data),
+    .pf_mem_wr_mask (pf_mem_wr_mask),
+    .ent            (ent),
+    .head           (head),
+    .upd_en         (upd_en),
+    .upd_idx        (upd_idx),
+    .upd_ent        (upd_ent),
+    .inst_en        (inst_en),
+    .inst_idx       (inst_idx),
+    .inst_err       (inst_err),
+    .wbr_en         (wbr_en),
+    .wbr_idx        (wbr_idx),
+    .release_en     (release_en)
   );
 
   sh_l2_ctrl #(
     .TAG_RD_DEL  (TAG_RD_DEL),
     .DATA_RD_DEL (DATA_RD_DEL),
     .LRU_RD_DEL  (LRU_RD_DEL),
+    .PF_RD_DEL   (PF_RD_DEL),
     .RST_LOW     (RST_LOW),
     .RST_ASYNC   (RST_ASYNC)
   ) u_ctrl (
     .clk              (clk),
     .rst              (rst),
-    .req_vld          (req_vld),
-    .req_hdr          (req_hdr),
-    .req_bad          (req_bad),
-    .req_full         (req_full),
-    .wbuf_data        (wbuf_data),
-    .wbuf_strb        (wbuf_strb),
-    .req_done         (req_done),
+    .ent              (ent),
+    .head             (head),
+    .upd_en           (upd_en),
+    .upd_idx          (upd_idx),
+    .upd_ent          (upd_ent),
+    .inst_en          (inst_en),
+    .inst_idx         (inst_idx),
+    .inst_err         (inst_err),
+    .wbr_en           (wbr_en),
+    .wbr_idx          (wbr_idx),
+    .release_en       (release_en),
+    .pf_mem_rd_en     (pf_mem_rd_en),
+    .pf_mem_rd_addr   (pf_mem_rd_addr),
+    .pf_mem_rd_data   (pf_mem_rd_data),
     .t_rsp_vld        (t_rsp_vld),
     .t_rsp_rdy        (t_rsp_rdy),
     .t_rsp_flit       (t_rsp_flit),

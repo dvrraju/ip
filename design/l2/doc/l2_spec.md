@@ -1,6 +1,7 @@
 # L2 Cache Specification (draft)
 
-Status: version 1 implemented (`design/l2/rtl`).
+Status: version 2 implemented (`design/l2/rtl`): hit-under-miss and up to
+`PF_DEPTH` outstanding misses; see `l2_uarch.md`, Version 2.
 
 ## 1. Overview
 
@@ -112,17 +113,23 @@ A writeback error in the same cycle as `wb_err_clr` leaves `wb_err` set.
 
 ## 6. Concurrency
 
-Version 1 is **blocking**: the L2 handles one request at a
-time. During a miss, later requests (hits included) wait. At most one
-fill and one writeback are outstanding, using fixed NoC tags.
+Requests wait in a pending FIFO of `PF_DEPTH` entries (default 16, at
+most 2^`TAG_W`); `t_req` is not ready when it is full. Hits are served
+while misses are outstanding, and up to `PF_DEPTH` misses can be
+outstanding. Requests to the same line complete in the order they arrive
+at the L2: when a command is accepted it records a dependency on the
+youngest pending command to the same line, and starts only after that
+command has completed. Responses to requests for different lines may
+complete out of order (agents match responses by tag).
 
-Version 2 (later): hit-under-miss and several outstanding misses
-(MSHRs), with requests to the same line kept in order. For a single L2
-shared by all agents this matters more than for a distributed one, since
-one agent's miss otherwise stalls everyone.
+Memory may answer the L2's fills and writebacks in any order. The L2 does
+not refill a line until that line's writeback has been answered.
 
-Ordering guarantee (both versions): requests to the same line are
-processed in the order they arrive at the L2.
+Version 1 handled one request at a time.
+
+The pending FIFO is a further external memory port: `PF_DEPTH`
+entries, each holding a whole request (header and a line of write data
+with strobes).
 
 ## 7. Geometry (`sh_l2_pkg`)
 
@@ -149,9 +156,10 @@ cycle returns the old data.
 | Tag   | `NUM_SETS`                   | `NUM_WAYS x (tag + valid + dirty)` | per way    |
 | Data  | `NUM_SETS x NUM_WAYS x 8`    | `FLIT_W` (one flit)                | per byte   |
 | LRU   | `NUM_SETS`                   | `NUM_WAYS - 1` bits                | none       |
+| Pending FIFO | `PF_DEPTH`         | `(WORDS + 1) x SLOT_W` (header slot + 8 x {strb, data}) | per slot |
 
 Default sizes: tag 2048 x 136 bits, data 131072 x 64 bits (1 MB),
-LRU 2048 x 7 bits.
+LRU 2048 x 7 bits, pending FIFO 16 x 648 bits (9 slots of 72).
 
 ## 9. Reset and initialization
 

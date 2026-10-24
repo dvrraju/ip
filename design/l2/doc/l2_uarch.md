@@ -267,3 +267,198 @@ FSM state names in the RTL: `S_RD_HDR`/`S_RD_DATA` are RD_HIT (header,
 then data), `S_WB_HDR`/`S_WB_DATA` are WB, `S_FILL_REQ`/`S_FILL_WAIT` are
 FILL, `S_FULL_WR` is the whole-line write, and `S_RSP` covers RESP for
 writes and REJECT/error responses.
+
+---
+
+# Version 2: hit-under-miss and multiple outstanding misses
+
+Status: implemented (`sh_l2_pfifo`, `sh_l2_ctrl`).
+
+## V2.1 Goal
+
+Version 1 serves one command at a time, so one agent's miss (a memory
+round trip, possibly with a writeback) stalls every agent. Version 2 keeps
+the lookup and data paths busy while misses are outstanding:
+
+- **Hit-under-miss:** hits are served while fills are in flight.
+- **Miss-under-miss:** up to `PF_DEPTH` misses are outstanding at once.
+- **Commands to the same line stay in order:** each command depends on
+  the one before it to the same line and is not started until that one has
+  completed.
+
+Responses to commands for different lines may complete out of order.
+Agents match responses by tag.
+
+## V2.2 Pending FIFO
+
+The single-command intake of v1 becomes the **pending FIFO**: `PF_DEPTH`
+entries (a `sh_l2_pkg` parameter, default 16, at most 2^`TAG_W` because
+fills and writebacks are tagged with the entry index). A command lives in
+one entry from arrival until its response is sent; a command that misses
+stays in its entry, so the pending FIFO is also the miss tracker. When
+every entry is in use, `t_req` is not ready and the NoC holds further
+commands.
+
+**Organization.** The FIFO is circular: commands are allocated at the
+tail, entries are freed in any order, and the head advances past freed
+entries. An entry's age is its distance from the head. A freed entry is
+reused only once the head has passed it (and its writeback, if any, has
+been answered), so an old miss at the head lowers the usable depth until
+it completes.
+
+**Storage.** The pending FIFO memory is an external memory port:
+`PF_DEPTH` entries, each holding a whole command in `WORDS + 1` slots of
+`SLOT_W` bits (slot 0 the header, slot 1 + i data flit i as {strb, data};
+648 bits at defaults), with one write-mask bit per slot, so each flit is
+written into its slot as it arrives. When the pipeline picks an entry it
+reads it once (latency `PF_RD_DEL`) into the active command register.
+
+Per entry, in flops (searched across all entries): state, line address,
+`dep` and `dep_id`, reserved way (`prim`, `way`), `wait_on` (for
+`WB_WAIT`), `err`, and `wb_pend` / `wb_line` for a writeback the entry
+caused.
+
+```
+ t_req ──► accept at the tail ──────────────► ┌──────────────────────────────────┐
+           dependency lookup: youngest         │ PENDING FIFO (PF_DEPTH entries)  │
+           pending entry of the same line      │ head (oldest) .. tail            │
+           -> dep, dep_id                      │ memory: command + write data     │
+                                               │ flops: state, line, dep, dep_id, │
+                                               │ prim, way, wait_on, err,         │
+                                               │ wb_pend, wb_line                 │
+                                               └───┬──────────────────▲───────────┘
+                     pick: oldest entry with no dep │                 │ free: clear dep of
+                     (NEW / READY / NEEDFILL)       ▼                 │ dependents; fill /
+                                               ┌──────────┐           │ writeback done: wake
+                                               │ LOOKUP   │           │
+                                               │ COMPARE  │───────────┘
+                                               └────┬─────┘
+             hit ┌──────────────────┬───────────────┴───┐ miss
+                 ▼                  ▼                   ▼
+            ┌─────────┐       ┌──────────┐        ┌───────────┐
+            │ RD_HIT  │       │ WR_HIT   │        │ ALLOCATE  │──► i_req
+            │ → t_rsp │       │ → ack    │        │ victim WB │    (WB, fill)
+            └─────────┘       └──────────┘        │ fill req  │
+                                                  └───────────┘
+ i_rsp ──► FILL RETURN: write fill words into the reserved way, install the
+           tag, entry -> READY; writeback responses clear wb_pend
+```
+
+## V2.3 Dependencies
+
+When a command is accepted, the pending FIFO is looked up for pending
+commands (any state but `FREE`) to the same line. If there are any, the
+new command's `dep` flag is set and `dep_id` records the **youngest** of
+them. The commands to a line therefore form a chain, each depending on
+exactly one earlier command. A command with `dep` set is never picked.
+When a command completes (its response is sent and its entry freed,
+whatever its status), every entry with `dep_id` = that entry clears `dep`.
+
+Consequences:
+
+- At most one command per line is past its dependency at any time, so the
+  pipeline never holds two commands of one line, and there are no
+  secondary misses.
+- A command that depends on a miss starts only after that miss has
+  filled, replayed and responded, so it finds the line in the cache.
+- If the command it depends on failed (`RSP_SLVERR`), the dependent still
+  starts; it looks up the line itself.
+
+Cost: one line-address comparator per entry at accept time (26 bits at
+defaults), plus a backward priority scan from the tail; the dependency
+clear compares `dep_id` (log2 bits) per entry.
+
+## V2.4 Entry states
+
+| State | Meaning |
+|---|---|
+| `FREE` | unused |
+| `LOAD` | receiving its flits from `t_req` |
+| `NEW` | complete; may be picked once `dep` is clear |
+| `ACTIVE` | in the pipeline |
+| `WB_WAIT` | missed; its line's writeback is still outstanding, so the fill waits for that writeback's response |
+| `NEEDFILL` | missed; that writeback is answered, ready to send its fill |
+| `FILL` | missed; fill outstanding |
+| `NO_WAY` | missed, but every way of its set is reserved by outstanding fills; back to `NEW` when a way is released |
+| `READY` | its fill is done (or failed): replays through the pipeline |
+
+- **Pick:** the oldest entry (nearest the head) with `dep` clear in
+  `NEW`, `READY` or `NEEDFILL`.
+- **Miss:** pick a victim way that no other entry has reserved (else
+  `NO_WAY`), reserve it (`prim`, `way`), invalidate its tag, write the
+  victim back if dirty (NoC tag = entry index; record `wb_line`, set
+  `wb_pend`), then send the fill with NoC tag = entry index (`FILL`), or
+  wait in `WB_WAIT` if the line's own writeback is still outstanding.
+- **Fill returns:** words are written into the reserved way as they
+  arrive; on the last word the tag (valid, clean) is installed and the
+  entry becomes `READY` (with `err` on a fill error, which installs
+  nothing).
+- **Replay:** a `READY` entry goes through the pipeline again: it hits
+  and completes as in v1, or with `err` gets a header-only `RSP_SLVERR`.
+  Its way reservation is released when it completes.
+- **Whole-line write miss:** no fill; after any victim writeback it writes
+  the line from the active command and installs it dirty, then responds.
+  If the line's previous writeback is still outstanding it takes the fill
+  path instead, so a line never has two writebacks outstanding.
+
+## V2.5 Memory ordering
+
+Memory owners may handle requests and return responses in any order. The
+only ordering the L2 depends on is a dirty victim's **writeback** reaching
+memory before a later **fill of the same line**. The L2 enforces it: a
+writeback is tagged with the index of the entry that caused it (the
+response type, `PKT_WR_RSP` vs `PKT_RD_RSP`, tells it apart from that
+entry's fill); the entry records the victim's line and `wb_pend` until the
+writeback is answered; and before a miss sends its fill, its line is
+compared with every pending writeback's line. On a match it waits in
+`WB_WAIT` and sends the fill when that writeback's response arrives.
+
+## V2.6 Hazards
+
+| Hazard | Handling |
+|---|---|
+| Fill install writes the tag in the same cycle a lookup reads that set (1R1W returns old data) | The command being looked up is of another line (commands of the filling line depend on it). The reserved way is excluded from victim selection, so the stale view of it does no harm. |
+| Two lookups to the same set back to back, the first allocating a way | The pipeline finishes allocation (victim tag invalidated) before the next lookup reads tags. |
+| Fill data overwriting a way that a hit is reading | The way's tag is invalidated at allocation, so no hit selects it. |
+| Tag or data write port wanted by the pipeline and a fill in the same cycle | The pipeline wins; a fill word or install waits a cycle (`i_rsp` is held). Fills always drain. |
+| Pending FIFO full of misses | `t_req` back-pressures; fills drain without the pipeline, then replays free entries. No deadlock. |
+| An accepted command's predecessor completes in the same cycle | The lookup ignores an entry being freed that cycle. |
+
+## V2.7 NoC tags of the L2's requests
+
+| Request | Tag |
+|---|---|
+| Fill for entry i | i |
+| Writeback caused by entry i | i (its response is `PKT_WR_RSP`, the fill's `PKT_RD_RSP`) |
+
+## V2.8 Cost (defaults: 16 entries, 64-bit flits)
+
+- Flops: about 16 x 72 bits of per-entry state, plus the active command
+  register (648 bits, as v1's intake buffer).
+- Logic: 16 line comparators at accept (dependency lookup), 16 against
+  pending writeback lines, 16 set comparators (reserved ways), 16
+  `dep_id` comparators, rotating priority encoders over 16 entries.
+- External memory: the pending FIFO, 16 x 648 bits, 1R1W, 9-bit write
+  mask.
+
+## V2.9 Hook for maintenance operations (next step)
+
+Flush and invalidate will enter the pipeline as another command source.
+"Flush all" waits for the pending FIFO's misses to drain, then walks every
+set and way, writing back dirty lines.
+
+## V2.10 Verification
+
+- Unit test: up to 16 outstanding commands with responses matched by tag;
+  a memory model that answers fills and writebacks out of order, applies
+  writeback data and reads fill data only when it answers (so a fill that
+  overtook its writeback would return stale data), and flags such a fill
+  directly; buffer depths 2, 4 and 16; read latency on every memory;
+  same-line hotspots.
+- A simulation check in `sh_l2_pfifo`: of the pending commands of one
+  line, only one may have no dependency.
+- System test in the mesh, as for v1.
+- Mutation checks: dependency never set, dependency on the oldest instead
+  of the youngest, dependency cleared at pick instead of completion,
+  reserved ways not skipped, picking the newest entry, not waiting for a
+  line's writeback.
